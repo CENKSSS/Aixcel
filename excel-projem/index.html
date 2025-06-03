@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8" />
+  <title>AI Destekli Excel</title>
+  <link rel="stylesheet" href="https://cdn.syncfusion.com/ej2/material.css" />
+  <script src="https://cdn.syncfusion.com/ej2/dist/ej2.min.js"></script>
+  <link rel="stylesheet" href="css/style.css" />
+  <link rel="stylesheet" href="css/modal.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    html, body { margin: 0; padding: 0; height: 100%; font-family: Arial, sans-serif; }
+    #spreadsheet { height: 100vh; width: 100%; }
+    #ai-toggle {
+      position: fixed; top: 20px; right: 20px; z-index: 9999;
+      background-color: #007bff; color: white; border: none;
+      padding: 10px 15px; border-radius: 4px; cursor: pointer; font-weight: bold;
+    }
+    #ai-panel {
+      position: fixed; top: 0; right: 0; width: 0; height: 100%;
+      background: #f4f4f4; overflow: hidden; transition: width 0.3s ease;
+      z-index: 9998; box-shadow: -2px 0 5px rgba(0,0,0,0.1);
+      display: flex; flex-direction: column;
+    }
+    #ai-panel.open { width: 30%; }
+    #ai-header {
+      background: #343a40; color: #fff; padding: 12px;
+      font-size: 16px; font-weight: bold; text-align: center;
+    }
+    #ai-chat { flex: 1; padding: 10px; overflow-y: auto; font-size: 14px; }
+    #ai-input-area { display: flex; padding: 10px; border-top: 1px solid #ccc; background: #fff; align-items: center; }
+    #ai-input { flex: 1; padding: 8px; font-size: 14px; border: 1px solid #ccc; border-radius: 4px; }
+    #ai-send { margin-left: 6px; padding: 8px 12px; background: #28a745; color: white; border: none; border-radius: 4px; cursor: pointer; }
+    #ai-send:hover { background: #218838; }
+    #undo-btn {
+      margin-left: 6px;
+      background: #888; color: #fff; border: none;
+      padding: 8px 10px; border-radius: 4px; font-weight: bold; cursor: pointer;
+      font-size: 14px;
+    }
+    #testChartBtn {
+      margin: 18px 0 8px 20px;
+      padding: 8px 15px;
+      font-size: 15px;
+      background-color: #f44336;
+      color: #fff;
+      border: none;
+      border-radius: 5px;
+      font-weight: bold;
+      cursor: pointer;
+      box-shadow: 0 2px 8px #0002;
+      transition: background 0.2s;
+    }
+    #testChartBtn:hover {
+      background: #d32f2f;
+    }
+  </style>
+</head>
+<body>
+  <!-- TEST CHART BUTTON -->
+  <button id="testChartBtn">Grafiği Test Et</button>
+
+  <!-- SPREADSHEET -->
+  <div id="spreadsheet"></div>
+
+  <!-- AI PANEL -->
+  <button id="ai-toggle">🤖 AI</button>
+  <div id="ai-panel">
+    <div id="ai-header">AI Komut Paneli</div>
+    <div id="ai-chat"></div>
+    <div id="ai-input-area">
+      <input type="text" id="ai-input" placeholder="örnek: işaretli hücreleri kalın yap">
+      <button id="ai-send">Gönder</button>
+      <button id="undo-btn">Geri Al</button>
+    </div>
+  </div>
+
+  <script src="js/modal.js"></script>
+  <script src="js/chart-handler.js"></script>
+  <script src="js/main.js"></script>
+  <script>
+    // SYNCFUSION SPREADSHEET BAŞLAT
+    const spreadsheet = new ej.spreadsheet.Spreadsheet({
+      showRibbon: true,
+      showFormulaBar: true,
+      allowOpen: true,
+      allowSave: true,
+      enableContextMenu: true,
+      openUrl: 'http://localhost:3000/api/open',
+      saveUrl: 'http://localhost:3000/api/save'
+    });
+    spreadsheet.appendTo('#spreadsheet');
+
+    // Undo için stack
+    const aiHistory = [];
+
+    // AI PANELİ AÇ/KAPA
+    document.getElementById('ai-toggle').addEventListener('click', () => {
+      document.getElementById('ai-panel').classList.toggle('open');
+    });
+
+    // "Bunu mu demek istediniz" için geçici state
+    let waitingForCorrectionConfirm = false;
+    let pendingCommand = null;
+    let pendingMsg = '';
+
+    // AI GÖNDERME ve İŞLEME
+    document.getElementById('ai-send').addEventListener('click', async () => {
+      const input = document.getElementById('ai-input');
+      const msg = input.value.trim();
+      if (!msg) return;
+      appendToChat('🧑‍💻', msg);
+      input.value = '';
+
+      // Eğer düzeltme için onay bekleniyorsa, onayla veya iptal et
+      if (waitingForCorrectionConfirm) {
+        if (msg.toLowerCase() === "evet") {
+          appendToChat('🤖', 'İşlem uygulanıyor...');
+          runAICommand(pendingCommand, true);
+          waitingForCorrectionConfirm = false;
+          pendingCommand = null;
+          pendingMsg = '';
+        } else {
+          appendToChat('🤖', 'İşlem iptal edildi.');
+          waitingForCorrectionConfirm = false;
+          pendingCommand = null;
+          pendingMsg = '';
+        }
+        return;
+      }
+
+      appendToChat('🤖', 'İşleniyor...');
+      // AKTİF TABLOYU JSON FORMATINDA AL
+      const sheet = spreadsheet.getActiveSheet();
+      const data = (sheet.rows || []).map(row => (row.cells || []).map(cell => cell.value || ""));
+
+      // 1. Adım: Komutu önce düzgün Türkçe'ye çevirt
+      const correctionResp = await fetch('http://localhost:3000/assistant', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: "Aşağıdaki cümle düzgün Türkçe mi? Eğer değilse düzgün Türkçe'ye çevirip bana sadece düzeltmesini ve 'duzeltildi' mi 'dogru' mu olduğunu belirt: " + msg, sheet: data })
+      });
+      const correctionData = await correctionResp.json();
+
+      let corrected = null;
+      let isFixed = false;
+      try {
+        corrected = JSON.parse(correctionData.command || correctionData.jsonCommand || "{}");
+        isFixed = (corrected.status === "duzeltildi");
+      } catch {}
+      if (isFixed && corrected.duzeltildi) {
+        appendToChat('🤖', `Bunu mu demek istediniz: "${corrected.duzeltildi}" ? (evet/hayır)`);
+        waitingForCorrectionConfirm = true;
+        const aiResp = await fetch('http://localhost:3000/assistant', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message: corrected.duzeltildi, sheet: data })
+        });
+        const aiData = await aiResp.json();
+        pendingCommand = aiData.jsonCommand || aiData.command;
+        pendingMsg = corrected.duzeltildi;
+        return;
+      }
+
+      // Eğer düzeltme gerekmiyorsa, AI fonksiyonu doğrudan uygula
+      const response = await fetch('http://localhost:3000/assistant', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: msg, sheet: data })
+      });
+      const aiResult = await response.json();
+      let cmd = aiResult.jsonCommand;
+      if (typeof cmd === "string") {
+        cmd = cmd.replace(/```json|```js|```|\n/g, '').trim();
+        try { cmd = JSON.parse(cmd); } catch (e) { appendToChat('❌', 'JSON ayrıştırılamadı: ' + e.message); appendToChat('🤖', 'İşlem başarısız.'); return; }
+      }
+      if (cmd) {
+        runAICommand(cmd, true);
+        appendToChat('🤖', 'İşlem tamamlandı!');
+      } else if (aiResult.command) {
+        appendToChat('❌', 'Beklenen formatta JSON komutu alınamadı.');
+        appendToChat('🤖', 'İşlem başarısız.');
+      }
+    });
+
+    document.getElementById('ai-input').addEventListener('keydown', function(e) {
+      if (e.key === 'Enter') document.getElementById('ai-send').click();
+    });
+
+    // Geri Al butonu
+    document.getElementById('undo-btn').addEventListener('click', function() {
+      if (aiHistory.length === 0) {
+        appendToChat('🤖', 'Geri alınacak işlem yok.');
+        return;
+      }
+      const last = aiHistory.pop();
+      spreadsheet.openFromJson({ Workbook: last.Workbook });
+      appendToChat('🤖', 'Son yapılan AI işlemi geri alındı.');
+    });
+
+    function appendToChat(who, text) {
+      const line = document.createElement('div');
+      line.textContent = `${who} ${text}`;
+      document.getElementById('ai-chat').appendChild(line);
+      document.getElementById('ai-chat').scrollTop = 9999;
+    }
+
+    // AI'den gelen komutları çalıştır
+   function runAICommand(command, trackHistory) {
+  if (trackHistory) {
+    const oldJson = spreadsheet.saveAsJson();
+    aiHistory.push(oldJson);
+  }
+  if (Array.isArray(command)) {
+    command.forEach(cmd => runAICommand(cmd, false));
+    return;
+  }
+  switch (command.type) {
+    case 'cellFormat':
+      spreadsheet.cellFormat(command.params.format, command.params.range || spreadsheet.getActiveSheet().selectedRange);
+      break;
+    case 'sort':
+      spreadsheet.sort({ sortDescriptors: command.params }, command.params.range || spreadsheet.getActiveSheet().selectedRange);
+      break;
+    case 'dataClean':
+      if (command.params.action === "removeDuplicates") removeDuplicates(command.params.range);
+      if (command.params.action === "fillEmpty") fillEmpty(command.params.range, command.params.value || "");
+      break;
+    case 'createChart':
+      createChart(command.params.range, command.params.chartType);
+      break;
+    case 'generateReport':
+      generateReport(command.params.range, command.params.summary);
+      break;
+    case 'setFormula':
+    case 'formula':
+      spreadsheet.updateCell({ formula: command.params.formula }, command.params.cell);
+      break;
+case 'addColumn': {
+    const activeSheet = spreadsheet.getActiveSheet();
+
+    // Başlık satırı genellikle index 1 (yoksa 0)
+    let headerRowIndex = activeSheet.rows[1] && activeSheet.rows[1].cells.length > 0 ? 1 : 0;
+    let headerCells = activeSheet.rows[headerRowIndex]?.cells || [];
+
+    // En sağdaki dolu başlık indexini bul
+    let lastHeaderColIndex = headerCells.length - 1;
+    for (let i = headerCells.length - 1; i >= 0; i--) {
+        if (headerCells[i] && headerCells[i].value && headerCells[i].value !== "") {
+            lastHeaderColIndex = i;
+            break;
+        }
+    }
+    let newColIndex = lastHeaderColIndex + 1;
+
+    // Yeni sütunu tam ana başlıkların SAĞINA ekle
+    spreadsheet.insertColumn(newColIndex, 1);
+
+    // Sütun harfini hesapla (A=0, B=1, ...)
+    const newColLetter = String.fromCharCode(65 + newColIndex);
+
+    // Başlığı yaz
+    spreadsheet.updateCell({ value: command.params.header || '' }, newColLetter + (headerRowIndex + 1));
+    break;
+}
+
+    default:
+      alert("Bilinmeyen komut: " + command.type);
+  }
+}
+
+    function removeDuplicates(range) { alert("Burada duplikeleri silme işlemini yazabilirsin. (range: " + range + ")"); }
+    function fillEmpty(range, value) { alert("Burada boş hücreleri doldurma işlemini yazabilirsin. (range: " + range + ", value: " + value + ")"); }
+    function createChart(range, chartType) {
+      const sheet = spreadsheet.getActiveSheet();
+      const rows = sheet.rows || [];
+      const labels = [];
+      const data = [];
+      for (let i = 2; i < 5; i++) {
+        labels.push(rows[i]?.cells?.[0]?.value || "");
+        data.push(Number(rows[i]?.cells?.[3]?.value || 0));
+      }
+      drawChart(labels, data, chartType || 'pie', 'Ürün Bazında Satışlar');
+    }
+    function generateReport(range, summary) { alert("Burada raporlama/özet çıkarma fonksiyonunu yazabilirsin. (range: " + range + ", summary: " + summary + ")"); }
+  </script>
+</body>
+</html>
