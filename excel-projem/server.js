@@ -61,68 +61,66 @@ app.post('/api/save', (req, res) => {
   }
 });
 
-// EN SAĞ SÜTUN HESAPLAMA
-function getNextColumnLetter(lastCol) {
-  let col = lastCol.toUpperCase();
-  let carry = 1, res = '';
-  for (let i = col.length - 1; i >= 0; i--) {
-    let code = col.charCodeAt(i) - 64 + carry;
-    if (code > 26) {
-      code -= 26; carry = 1;
-    } else {
-      carry = 0;
-    }
-    res = String.fromCharCode(64 + code) + res;
-  }
-  if (carry) res = 'A' + res;
-  return res;
+// --------- DÜZELTİLEN FONKSİYONLAR ---------
+function findColumnIndex(headerRow, search) {
+  return headerRow.findIndex(h => (h + "").toLowerCase().trim() === search.toLowerCase().trim());
 }
-
-// ---- DÜZELTİLEN FONKSİYON ----
+function indexToColLetter(index) {
+  let col = '';
+  while (index >= 0) {
+    col = String.fromCharCode((index % 26) + 65) + col;
+    index = Math.floor(index / 26) - 1;
+  }
+  return col;
+}
 function fixColumnCommands(commands, sheet) {
-  if (!Array.isArray(commands)) return commands;
-  const headerRow = sheet[1];
-  let lastColIndex = headerRow.length - 1;
-  let lastColLetter = String.fromCharCode(65 + lastColIndex);
-  let newColLetter = getNextColumnLetter(lastColLetter);
+  // Komutları gelen gibi uygula, sadece "addColumn" varsa onu en sağa ekle
+  if (!Array.isArray(commands) || !sheet) return commands;
 
-  let addedColumn = false;
-  commands.forEach(cmd => {
-    if (cmd.type === "addColumn") addedColumn = true;
+  // Başlık satırını bul (ilk dolu satır)
+  const headerRow = sheet.find(row => row?.some(cell => cell?.toString().trim()));
+  if (!headerRow) return commands;
+
+  // En sağdaki dolu sütunun indexini bul
+  let lastColIdx = headerRow.length - 1;
+  while (lastColIdx >= 0 && (!headerRow[lastColIdx] || headerRow[lastColIdx] === "")) lastColIdx--;
+
+  return commands.map(cmd => {
+    if (cmd.type === "addColumn") {
+      // Eğer AI zaten position göndermediyse, ek sütunu en sağa koy
+      return { ...cmd, params: { ...cmd.params, position: lastColIdx + 1 } };
+    }
+    return cmd;
   });
-  if (addedColumn) {
-    commands.forEach(cmd => {
-      if (cmd.type === "formula" && cmd.params.cell) {
-        let cell = cmd.params.cell;
-        let match = cell.match(/^([A-Z]+)(\d+)$/);
-        if (match) {
-          let satir = Number(match[2]);
-          // Başlık satırıysa (genellikle 2), veri satırına çek
-          if (satir === 2) satir = 3;
-          cmd.params.cell = newColLetter + satir;
-        }
-      }
-    });
-  }
-  return commands;
 }
 
-// ---- /DÜZELTİLEN FONKSİYON ----
+
+function indexToColLetter(index) {
+  let col = '';
+  while (index >= 0) {
+    col = String.fromCharCode((index % 26) + 65) + col;
+    index = Math.floor(index / 26) - 1;
+  }
+  return col;
+}
+
+
+
+// --------- /DÜZELTİLEN FONKSİYONLAR ---------
 
 // AI Assistant endpoint
 app.post('/assistant', async (req, res) => {
   try {
     const userMessage = req.body.message;
     const userSheet = req.body.sheet;
-    const OPENAI_API_KEY = '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';
-
-    const prompt = `
-Aşağıda bir elektronik tablo verisi (Excel) var:
+    const OPENAI_API_KEY = 
+    // --- prompt burada başlıyor ---
+    const prompt = `Aşağıda bir elektronik tablo verisi (Excel) var:
 ${JSON.stringify(userSheet)}
 
 Kullanıcıdan gelen komut:
 "${userMessage}"
-
+SEN BİR EXCEL UZMANISIN, KULLANICI KOMUTLARINI ANLAYIP UYGUN JSON KOMUTLARI ÜRETECEKSİN.
 Aşağıdaki tabloyu ve örnekleri referans alarak, kullanıcıdan gelen komutları işleyip uygun JSON komutları üret:
 
 ---
@@ -157,37 +155,14 @@ Kullanıcı: "Sadece ikinci satırı sil"
 JSON: {"type":"deleteRow","params":{"rowIndex":1}}
 Kullanıcı: "yazı boyutunu 20 yap"
 JSON: {"type":"cellFormat","params":{"format":{"fontSize":"20pt"},"range":"A1:Z100"}}
-Kullanıcı: "Adedi 5 ve 5'ten fazla olanlara fazla, az olanlara az yaz"
-JSON: [
-  {"type":"addColumn","params":{"header":"Durum"}},
-  {"type":"formula","params":{"formula":"=IF(B3>=5,\\"Fazla\\",\\"Az\\")","cell":"D3"}},
-  {"type":"formula","params":{"formula":"=IF(B4>=5,\\"Fazla\\",\\"Az\\")","cell":"D4"}},
-  {"type":"formula","params":{"formula":"=IF(B5>=5,\\"Fazla\\",\\"Az\\")","cell":"D5"}}
-]
-
-Tabloya yeni bir sütun eklemen gerektiğinde, yeni sütunu her zaman mevcut sütunların EN SAĞINA ekle. 
+Tabloya yeni bir sütun eklemen gerektiğinde, yeni sütunu her zaman mevcut sütunların EN SAĞINA ekle.
 Örneğin, tablonun en sağında “Toplam” gibi bir sütun varsa, “Durum” sütunu ondan SONRA gelmeli.
-Sadece veri satırlarına formül uygula. 
+Sadece veri satırlarına formül uygula.
 Formül yazarken başlık satırına kesinlikle dokunma, formüllerin hücre referansı her zaman ilk veri satırından başlamalı (ör: başlık 2. satırdaysa formüller 3. satırdan başlar).
-Eğer tablonun en sağında zaten başka veri sütunu varsa, “Durum” başlığını onun bir sağındaki sütuna ekle.
-
-Tablo Örneği:
-A2: Ürün   | B2: Adet | C2: Fiyat | D2: Toplam
-A3: Telefon| B3: 10   | C3: 5000  | D3: 50000
-A4: Tablet | B4: 5    | C4: 3000  | D4: 15000
-A5: Laptop | B5: 3    | C5: 8000  | D5: 24000
-
-Kullanıcı: "adeti 5’ten fazla olanlara fazla, az olanlara az yaz"
-Beklenen JSON:
-[
-  {"type":"addColumn","params":{"header":"Durum"}}, 
-  {"type":"formula","params":{"formula":"=IF(B3>5,\\"Fazla\\",\\"Az\\")","cell":"E3"}},
-  {"type":"formula","params":{"formula":"=IF(B4>5,\\"Fazla\\",\\"Az\\")","cell":"E4"}},
-  {"type":"formula","params":{"formula":"=IF(B5>5,\\"Fazla\\",\\"Az\\")","cell":"E5"}}
-]
-
+-**ÇOK ÖNEMLİ:** Eğer tablonun en sağında zaten başka veri sütunu varsa, “Durum” başlığını onun bir sağındaki sütuna ekle.Durum başlığı, mevcut sütunların en sağında olmalı.Aksi durum kabul edilemez! DURUM HER DAİM EN SAĞDA OLACAK!.
+-**ÇOK ÖNEMLİ:** Sakın güncel tablodaki verilerin yerlerini değiştirme, eğer kullanıcı "adeti 5'ten fazla olanlara fazla, az olanlara az yaz" gibi bir şey derse, bu durumda yeni bir sütun ekle ve formülü o sütuna uygula sakın olaki aktif verileri yani adet,fiyat gibi sütünların yerlerini değiştirme!.Fazla veya az yazılacak sütun, mevcut sütunların en sağında olmalı.
 Kurallar:
-- Tablo başlıklarının (ör: Ürün, Adet, Fiyat) hangi satırda olduğunu analiz et. 
+- Tablo başlıklarının (ör: Ürün, Adet, Fiyat, NUFUS ) gibi veriler hangi satırda olduğunu analiz et.
 - Başlık satırına asla formül veya veri yazma; işlemleri yalnızca veri satırlarına uygula.
 - Eğer kullanıcı "5 ve 5'ten fazla" diyorsa, matematiksel olarak ">=" kullan, formül buna göre oluşturulsun.
 - Sütun ekleme, formül uygulama gibi adımlar gerektiğinde, bunları sırasıyla JSON dizisi olarak döndür.
@@ -197,10 +172,7 @@ Kurallar:
 - Kullanıcı sohbet dilinde, eksik, çok günlük, hatalı ya da saçma bir şey de yazsa, sen asla hata verme! Her zaman makul bir çözüm bul ve uygula.
 - Gerekirse varsayım yap, önce veri temizlemesi, ek sütun/formül, hata kontrolü vs. adımları uygula.
 - Birden fazla adım gerekiyorsa, her adımı sıralı bir JSON dizi olarak döndür:
-[
-  {"type":"formula", "params":{"formula":"=PRODUCT(B3,C3)", "cell":"D3"}},
-  {"type":"formula", "params":{"formula":"=SUM(D3:D5)", "cell":"E5"}}
-]
+
 - Tek adım gerekiyorsa yine {"type":"formula", ...} ile dön.
 - "type" parametresine uygun türü yaz ("formula", "cellFormat", "dataClean", "sort", "filter", "createChart", "generateReport", "macro", "addColumn", "addRow", "custom" vs).
 - Eğer kullanıcıdan gelen komut gereksiz, boş, ya da şaka/mantıksız ise de, olabilecek en mantıklı ve uygulanabilir (gerekirse uydurulmuş) bir Excel işlemi üret.
@@ -213,6 +185,7 @@ Kurallar:
 
 Sen bir insan gibi, gerçek bir Excel uzmanı gibi cevap ver; **asla pes etme, her durumda çözüm üret!**
 `;
+    // --- prompt burada bitiyor ---
 
     const response = await axios.post(
       'https://api.openai.com/v1/chat/completions',
@@ -232,11 +205,13 @@ Sen bir insan gibi, gerçek bir Excel uzmanı gibi cevap ver; **asla pes etme, h
     );
 
     const content = response.data.choices?.[0]?.message?.content ?? "";
+    console.log("OPENAI YANITI:", content);
     let jsonCommand = null;
     try { jsonCommand = JSON.parse(content); } catch {}
     // EN SAĞ SÜTUN DÜZELTME!
     if (jsonCommand && Array.isArray(jsonCommand) && req.body.sheet) {
-      jsonCommand = fixColumnCommands(jsonCommand, req.body.sheet);
+  jsonCommand = fixColumnCommands(jsonCommand, req.body.sheet);
+
     }
     if (jsonCommand) res.json({ jsonCommand });
     else res.json({ command: content.trim() });

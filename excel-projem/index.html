@@ -169,18 +169,33 @@
         body: JSON.stringify({ message: msg, sheet: data })
       });
       const aiResult = await response.json();
-      let cmd = aiResult.jsonCommand;
-      if (typeof cmd === "string") {
-        cmd = cmd.replace(/```json|```js|```|\n/g, '').trim();
-        try { cmd = JSON.parse(cmd); } catch (e) { appendToChat('❌', 'JSON ayrıştırılamadı: ' + e.message); appendToChat('🤖', 'İşlem başarısız.'); return; }
-      }
-      if (cmd) {
-        runAICommand(cmd, true);
-        appendToChat('🤖', 'İşlem tamamlandı!');
-      } else if (aiResult.command) {
-        appendToChat('❌', 'Beklenen formatta JSON komutu alınamadı.');
-        appendToChat('🤖', 'İşlem başarısız.');
-      }
+      let cmd = aiResult.jsonCommand || aiResult.command;
+if (typeof cmd === "string") {
+  // Kod bloklarını, baştaki/sondaki açıklamaları ve gereksiz satırları temizle
+  cmd = cmd.replace(/```json|```js|```/g, '').trim();
+  // Sadece ilk açılan ve kapanan süslü/parantez arasını çek
+  const arrMatch = cmd.match(/\[.*\]/s);
+  const objMatch = cmd.match(/\{.*\}/s);
+  let pure = null;
+  if (arrMatch) pure = arrMatch[0];
+  else if (objMatch) pure = objMatch[0];
+  else pure = cmd;
+  try { 
+    cmd = JSON.parse(pure); 
+  } catch (e) { 
+    appendToChat('❌', 'JSON ayrıştırılamadı: ' + e.message + " - Dönen veri: " + pure); 
+    appendToChat('🤖', 'İşlem başarısız.'); 
+    return; 
+  }
+}
+if (cmd && (Array.isArray(cmd) || typeof cmd === "object")) {
+  runAICommand(cmd, true);
+  appendToChat('🤖', 'İşlem tamamlandı!');
+} else {
+  appendToChat('❌', 'Beklenen formatta JSON komutu alınamadı.');
+  appendToChat('🤖', 'İşlem başarısız.');
+}
+
     });
 
     document.getElementById('ai-input').addEventListener('keydown', function(e) {
@@ -216,9 +231,16 @@
     return;
   }
   switch (command.type) {
-    case 'cellFormat':
-      spreadsheet.cellFormat(command.params.format, command.params.range || spreadsheet.getActiveSheet().selectedRange);
-      break;
+    case 'cellFormat': {
+    // AI range gönderse bile "selected" veya yoksa, her zaman kullanıcı seçimini kullan
+    let range = command.params.range;
+    if (!range || range === "selected" || range.match(/^A1:D[0-9]+$/)) {
+        range = spreadsheet.getActiveSheet().selectedRange;
+    }
+    spreadsheet.cellFormat(command.params.format, range);
+    break;
+}
+
     case 'sort':
       spreadsheet.sort({ sortDescriptors: command.params }, command.params.range || spreadsheet.getActiveSheet().selectedRange);
       break;
